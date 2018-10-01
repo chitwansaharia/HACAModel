@@ -69,6 +69,12 @@ config = {
     }
 
 # Tensorboard writer to write the summary
+if not os.path.isdir("logs"):
+    os.makedirs("logs")
+
+if not os.path.isdir("models"):
+    os.makedirs("models")
+
 writer = SummaryWriter("logs/{}".format(model_name))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Cross entropy loss
