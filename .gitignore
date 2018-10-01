@@ -1,0 +1,6 @@
+logs/
+logging/
+models/
+*.pyc
+__pychache__/
+HACA/
