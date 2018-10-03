@@ -129,37 +129,28 @@ class decoder(nn.Module):
                                 )
             self.context_size = self.input_size-global_output_size-embedding_size
         # Attention matrices used to calculate visual context at time t
-        self.visual_attention_weight = [nn.Linear(self.context_size, encoder_output_size["visual"], bias=False),
-                                        nn.Linear(encoder_output_size["visual"], encoder_output_size["visual"], bias=False),
-                                        nn.Linear(encoder_output_size["visual"],1, bias=False)]
-        if device.type == "cuda":
-            self.visual_attention_weight = [layer.cuda() for layer in self.visual_attention_weight]
+        self.visual_attention_weight_1 = nn.Linear(self.hidden_size,self.context_size, bias=False)
+        self.visual_attention_weight_2 = nn.Linear(encoder_output_size["visual"], self.context_size, bias=False)
+        self.visual_attention_weight_3 = nn.Linear(self.context_size,1, bias=False)
+        self.visual_enc_to_dec_mat = nn.Linear(encoder_output_size["visual"], self.context_size, bias=True)
 
         # Attention matrices used to calculate audio context at time t
-        self.audio_attention_weight = [nn.Linear(self.context_size, encoder_output_size["audio"], bias=False),
-                                        nn.Linear(encoder_output_size["audio"], encoder_output_size["audio"], bias=False),
-                                        nn.Linear(encoder_output_size["audio"],1, bias=False)]
-        if device.type == "cuda":
-            self.audio_attention_weight = [layer.cuda() for layer in self.audio_attention_weight]
+        self.audio_attention_weight_1 = nn.Linear(self.hidden_size,self.context_size, bias=False)
+        self.audio_attention_weight_2 = nn.Linear(encoder_output_size["audio"], self.context_size, bias=False)
+        self.audio_attention_weight_3 = nn.Linear(self.context_size,1, bias=False)
+        self.audio_enc_to_dec_mat = nn.Linear(encoder_output_size["audio"], self.context_size, bias=True)
+
 
         # Attention matrices used to calculate hidden vectors' context at time t
-        self.hidden_attention_weight = [nn.Linear(self.context_size, self.hidden_size, bias=False),
-                                        nn.Linear(self.hidden_size, self.hidden_size, bias=False),
-                                        nn.Linear(self.hidden_size, 1, bias=False)]
-        if device.type == "cuda":
-            self.hidden_attention_weight = [layer.cuda() for layer in self.hidden_attention_weight]
-
-        # Scaling matrices for three contexts
-        self.audio_context_weight = nn.Linear(encoder_output_size["audio"], self.context_size, bias=True)
-        self.visual_context_weight = nn.Linear(encoder_output_size["visual"], self.context_size, bias=True)
-        self.hidden_context_weight = nn.Linear(self.hidden_size, self.context_size, bias=True)
+        self.hidden_attention_weight_1 = nn.Linear(self.hidden_size,self.context_size, bias=False)
+        self.hidden_attention_weight_2 = nn.Linear(self.hidden_size,self.context_size, bias=False)
+        self.hidden_attention_weight_3 = nn.Linear(self.context_size,1, bias=False)
+        self.hid_to_dec_mat = nn.Linear(self.hidden_size, self.context_size, bias=True)
 
         # Attention matrices used to compute attention over scaled vectors
-        self.context_attention_weight = [nn.Linear(self.hidden_size, self.context_size, bias=False),
-                                        nn.Linear(self.context_size, self.context_size, bias=False),
-                                        nn.Linear(self.context_size,1, bias=False)]
-        if device.type == "cuda":
-            self.context_attention_weight = [layer.cuda() for layer in self.context_attention_weight]
+        self.context_attention_weight_1 = nn.Linear(self.hidden_size,self.context_size, bias=False)
+        self.context_attention_weight_2 = nn.Linear(self.context_size, self.context_size, bias=False)
+        self.context_attention_weight_3 = nn.Linear(self.context_size,1, bias=False)
 
 
     def get_context(self, vec1, vec2_list, weights):
@@ -185,27 +176,36 @@ class decoder(nn.Module):
 
     def forward(self, input, encoder_outputs, hidden_states, cell_state, context):
         batch_size = input.shape[0]
-        hidden = hidden_states[-1]
+        hidden_state = hidden_states[-1]
         # cf = torch.zeros([batch_size, 1, self.context_size], device=self.device)
 
         # getting contexts for the time_step
-        visual_context = self.get_context(context, encoder_outputs["visual"], self.visual_attention_weight)
-        audio_context = self.get_context(context, encoder_outputs["audio"], self.audio_attention_weight)
-        hidden_context = self.get_context(context, torch.stack(hidden_states, dim=2)[0,:,:,:], self.hidden_attention_weight)
+        attention_weights = [self.visual_attention_weight_1, self.visual_attention_weight_2, self.visual_attention_weight_3]
+        visual_context = self.get_context(torch.transpose(hidden_state,0,1), encoder_outputs["visual"], attention_weights)
+        visual_context = torch.unsqueeze(self.visual_enc_to_dec_mat(visual_context),dim=1)
+
+        attention_weights = [self.audio_attention_weight_1, self.audio_attention_weight_2, self.audio_attention_weight_3]
+        audio_context = self.get_context(torch.transpose(hidden_state,0,1), encoder_outputs["audio"], attention_weights)
+        audio_context = torch.unsqueeze(self.audio_enc_to_dec_mat(audio_context),dim=1)
+
+        concatenated_hs = torch.transpose(torch.cat(hidden_states, dim=0),0,1)
+        attention_weights = [self.hidden_attention_weight_1, self.hidden_attention_weight_2, self.hidden_attention_weight_3]
+        hidden_context = self.get_context(torch.transpose(hidden_state,0,1), concatenated_hs, attention_weights)
+        hidden_context = self.hid_to_dec_mat(torch.unsqueeze(hidden_context, dim=1))
 
         # stacking these contexts together
-        context_stack = torch.stack([self.audio_context_weight(audio_context), self.visual_context_weight(visual_context),
-                                    self.hidden_context_weight(hidden_context)], dim=1)
+        all_context = torch.cat([visual_context, hidden_context, audio_context], dim=1)
 
-        # computing their weighted summation
-        final_context_input = torch.unsqueeze(self.get_context(torch.transpose(hidden,0,1),context_stack, self.context_attention_weight), dim=1)
+        attention_weights = [self.context_attention_weight_1, self.context_attention_weight_2, self.context_attention_weight_3]
+        final_context = self.get_context(torch.transpose(hidden_state,0,1), all_context, attention_weights)
+        final_context = torch.unsqueeze(final_context, dim=1)
 
-        input = torch.cat([final_context_input, input], dim=2)
-        output, hidden, cell_state = self.decoder_rnn(input, hidden, cell_state)
+        input = torch.cat([final_context, input], dim=2)
+        output, hidden_state, cell_state = self.decoder_rnn(input, hidden_state, cell_state)
 
         if not self.isglobal:
             output = torch.unsqueeze(self.output_layer(torch.squeeze(output, dim=1)), dim=1)
-        return output, hidden, cell_state, final_context_input
+        return output, hidden_state, cell_state, final_context
 
 
 class HACAModel(nn.Module):
@@ -281,7 +281,7 @@ class HACAModel(nn.Module):
                     if val == 1:
                         input_ts = input["caption_x"][:, time_step+1]
                     else:
-                        max_pred = torch.squeeze(torch.max(output_local, dim=2, keepdim=False)[1], dim=1)
+                        max_pred = torch.squeeze(torch.max(output_local.data, dim=2, keepdim=False)[1], dim=1)
                         input_ts = max_pred
 
         return output_caption
