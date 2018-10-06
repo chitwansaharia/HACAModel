@@ -6,6 +6,7 @@ import pickle
 from random import shuffle
 import os
 import numpy as np
+import sys
 
 # Creates the vocabulary given all the sentences (captions) in the training set
 # Params : list of (sentences,video_id) in the training set
@@ -82,7 +83,9 @@ def get_sentences(data):
     sentences = [(data['sentences'][item]['caption'],data['sentences'][item]['video_id']) for item in range(len(data['sentences']))]
     return sentences
 
-def main():
-    # Training set processing and vocabulary
+if __name__ == '__main__':
     with open(sys.argv[1]) as file:
         data = json.load(file)
+
+    sentences = get_sentences(data)
+    create_vocab(sentences)

@@ -11,6 +11,7 @@ import argparse
 import time
 import datetime
 from evaluate import calculate_metrics
+from development_model import *
 
 # Vocabulary (Used while testing)
 vocab_path = "./meta_data/vocab.pkl"
@@ -215,11 +216,16 @@ def test_model(model, mode):
 if __name__ == "__main__":
     # Created the main model
     haca_model = HACAModel(config, device, batch_size, max_caption_length)
+    # haca_model = EncDecModel(config, device, batch_size, max_caption_length, False, False)
+    for name, param in haca_model.named_parameters():
+        print(name, param.shape)
+
     if device.type == "cuda":
         haca_model.cuda()
     # Initialized the model parameters with uniform distribution
     for parameter in haca_model.parameters():
         torch.nn.init.uniform_(parameter, -0.08, 0.08)
+
     print("Starting Training")
     print(args)
     # Choosing the gradient optimizer
@@ -236,11 +242,14 @@ if __name__ == "__main__":
     best_metric = 0
     total_start_time = time.time()
     total_train_loss_history = []
-
     for epoch_num in range(epochs):
         # If patience goes to 4, the learning rate is decayed by half
         if patience == 4:
             scheduler.step()
+            haca_model.load_state_dict(torch.load('models/{}.pt'.format(args.model))["state_dict"])
+            print("Loading the best saved model")
+            if device.type == "cuda":
+                haca_model.cuda()
             patience = 0
         # Training and Validation epochs
         log_number, total_train_loss = run_epoch(epoch_num, "train", log_number)
@@ -266,7 +275,7 @@ if __name__ == "__main__":
               'args': args,
               'state_dict': haca_model.state_dict(),
               'loss_history': total_train_loss_history,
-            }, "models/{}".format(args.model))
+            }, "models/{}.pt".format(args.model))
             patience = 0
         else:
             patience += 1

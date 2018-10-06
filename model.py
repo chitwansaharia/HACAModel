@@ -194,11 +194,12 @@ class decoder(nn.Module):
         hidden_context = self.hid_to_dec_mat(torch.unsqueeze(hidden_context, dim=1))
 
         # stacking these contexts together
+        tanh = nn.Tanh()
         all_context = torch.cat([visual_context, hidden_context, audio_context], dim=1)
 
         attention_weights = [self.context_attention_weight_1, self.context_attention_weight_2, self.context_attention_weight_3]
         final_context = self.get_context(torch.transpose(hidden_state,0,1), all_context, attention_weights)
-        final_context = torch.unsqueeze(final_context, dim=1)
+        final_context = tanh(torch.unsqueeze(final_context, dim=1))
 
         input = torch.cat([final_context, input], dim=2)
         output, hidden_state, cell_state = self.decoder_rnn(input, hidden_state, cell_state)
