@@ -11,12 +11,8 @@ import argparse
 import time
 import datetime
 from evaluate import calculate_metrics
-from development_model import *
+from baseline_model import *
 
-# Vocabulary (Used while testing)
-vocab_path = "./meta_data/vocab.pkl"
-vocab = pickle.load(open(vocab_path,'rb'))
-id_to_word = {v: k for k, v in vocab.items()}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch-size", type=int, default=20,
@@ -39,47 +35,12 @@ parser.add_argument("--optimizer", default="adadelta",
                     help="type of optimizer to use for training")
 parser.add_argument("--max-videos", default=-1, type=int,
                     help="maximum number of videos in the training set (default: -1 -> use all the videos)")
-
-args = parser.parse_args()
-
-# general parameters
-batch_size = args.batch_size
-max_caption_length = 15
-lr = args.lr
-# Used for Adam Optimizer
-optim_eps = 1e-5
-
-model_name = args.model
-
-# Scheduled sampling parameter (decides whether to teacher force, or auto regress) (None or 0 means complete teacher forcing)
-ss_epsilon = None
-
-# All configurations used for training
-config = {
-    "audio_input_size" : 128,
-    "visual_input_size" : 2048,
-    "chunk_size" : {"audio" : 4, "visual" : 10}, # Granularity of high level encoder
-    "audio_hidden_size" : {"low" : 128, "high" : 64},
-    "visual_hidden_size" : {"low" : 512, "high" : 256},
-    "local_input_size" : 1024,
-    "global_input_size" : 1024,
-    "global_hidden_size" : 256,
-    "local_hidden_size" : 1024,
-    "vocab_size" : 10004,
-    "embedding_size" : 512
-    }
-
-# Tensorboard writer to write the summary
-if not os.path.isdir("logs"):
-    os.makedirs("logs")
-
-if not os.path.isdir("models"):
-    os.makedirs("models")
-
-writer = SummaryWriter("logs/{}".format(model_name))
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# Cross entropy loss
-criterion = nn.CrossEntropyLoss(reduce=False)
+parser.add_argument("--model-type", default="haca",
+                    help="type of model to use")
+parser.add_argument("--beam-search", action="store_true",
+                    help="whether to use beam search while testing")
+parser.add_argument("--max-caption-length", type=int, default=15,
+                    help="maximum caption length")
 
 
 ''' Runs one epoch '''
@@ -88,7 +49,7 @@ criterion = nn.CrossEntropyLoss(reduce=False)
         mode : train/valid (dataset to use)
         log_number : used for logging
 '''
-def run_epoch(epoch, mode, log_number):
+def run_epoch(epoch, mode):
     # Loads the iterator, if in training mode, and max_video != -1, only that much videos will be loaded for training.
     # However, for validation, all the videos will be loaded.
     if mode == "train":
@@ -122,6 +83,7 @@ def run_epoch(epoch, mode, log_number):
         # Loss multiplied with mask
         loss = loss*batch["mask"].view(-1)
         numele = torch.sum(batch["mask"]).item()
+
         loss = torch.sum(loss)/(numele)
 
         # Doing backprop, and computing grad norm, clipping gradients
@@ -141,12 +103,6 @@ def run_epoch(epoch, mode, log_number):
             total_ellapsed_time = int(time.time() - total_start_time)
             duration = datetime.timedelta(seconds=total_ellapsed_time)
             print("D {} | E {} | B {} | Loss {} | G {}".format(duration, epoch, num_batch, total_loss/num_batch, total_grad_norm/num_batch))
-            if mode == "train":
-                writer.add_scalar("Training Loss", total_loss/num_batch, log_number)
-                writer.add_scalar("Gradient Mag", total_grad_norm/num_batch, log_number)
-                writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], log_number)
-                log_number += 1
-
         batch = iterator.next()
     # Putting the model back on train mode in case it was on eval mode
     haca_model.train()
@@ -155,17 +111,20 @@ def run_epoch(epoch, mode, log_number):
         writer.add_scalar("Epoch Training Loss", total_loss/num_batch, epoch)
     else:
         writer.add_scalar("Epoch Validation Loss", total_loss/num_batch, epoch)
-    return log_number, total_loss/num_batch
+    return total_loss/num_batch
+
 
 ''' Tests the model '''
 ''' Params :
         model : The model to test
         mode : train/valid/test (dataset to use)
 '''
-def test_model(model, mode):
+def test_model(model, mode, beam_search):
     print("Testing the model")
     # Loads the iterator, if in training mode, and max_video != -1, only that much videos will be loaded for training.
     # However, for validation/testing, all the videos will be loaded.
+
+    model.eval()
     if mode == "train":
         iterator = SSIterator(batch_size, max_caption_length, 1, mode, device, args.max_videos)
     else:
@@ -184,9 +143,10 @@ def test_model(model, mode):
 
     while batch != None:
         # output_captions obtained from model
-        output_caption = model(batch, ss_epsilon)
-        output_caption = torch.cat(output_caption, dim=1)
-        output_caption = torch.max(output_caption, dim=2, keepdim=False)[1]
+        output_caption = model(batch, ss_epsilon, beam_search, beam_width)
+        if not beam_search:
+            output_caption = torch.cat(output_caption, dim=1)
+            output_caption = torch.max(output_caption, dim=2, keepdim=False)[1]
 
         # For each of the batch element
         for index in range(batch_size):
@@ -208,15 +168,70 @@ def test_model(model, mode):
     res = {"annotations" : res}
 
     # Calculates relevant metrices
-    metrics = calculate_metrics(gts,res)
+    metrics,element_wise_metric = calculate_metrics(gts,res)
     model.train()
-    return metrics
-
+    return metrics, element_wise_metric
 
 if __name__ == "__main__":
+
+    ################################################################################################################
+
+    # Vocabulary (Used while testing)
+    vocab_path = "./meta_data/vocab.pkl"
+    vocab = pickle.load(open(vocab_path,'rb'))
+    id_to_word = {v: k for k, v in vocab.items()}
+
+    beam_width = 15
+
+    args = parser.parse_args()
+
+    # general parameters
+    batch_size = args.batch_size
+    max_caption_length = args.max_caption_length
+    lr = args.lr
+    # Used for Adam Optimizer
+    optim_eps = 1e-5
+
+    model_name = args.model
+
+    # Scheduled sampling parameter (decides whether to teacher force, or auto regress) (None or 0 means complete teacher forcing)
+    ss_epsilon = None
+
+    # All configurations used for training
+    config = {
+        "audio_input_size" : 128,
+        "visual_input_size" : 2048,
+        "chunk_size" : {"audio" : 4, "visual" : 10}, # Granularity of high level encoder
+        "audio_hidden_size" : {"low" : 128, "high" : 64},
+        "visual_hidden_size" : {"low" : 512, "high" : 256},
+        "local_input_size" : 1024,
+        "global_input_size" : 1024,
+        "global_hidden_size" : 256,
+        "local_hidden_size" : 1024,
+        "vocab_size" : 10004,
+        "embedding_size" : 512
+        }
+
+    # Tensorboard writer to write the summary
+    if not os.path.isdir("logs"):
+        os.makedirs("logs")
+
+    if not os.path.isdir("models"):
+        os.makedirs("models")
+
+    writer = SummaryWriter("logs/{}".format(model_name))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Cross entropy loss
+    criterion = nn.CrossEntropyLoss(reduce=False)
+
+    ################################################################################################################
+
     # Created the main model
-    haca_model = HACAModel(config, device, batch_size, max_caption_length)
-    # haca_model = EncDecModel(config, device, batch_size, max_caption_length, False, False)
+    if args.model_type == "haca":
+        haca_model = HACAModel(config, device, batch_size, max_caption_length)
+    else:
+        haca_model = EncDecModel(config, device, batch_size, max_caption_length, True)
+
     for name, param in haca_model.named_parameters():
         print(name, param.shape)
 
@@ -233,16 +248,24 @@ if __name__ == "__main__":
         optimizer = torch.optim.Adadelta(haca_model.parameters(), lr)
     else:
         optimizer = torch.optim.Adam(haca_model.parameters(), lr)
+
     # Scheduler to decay gradients
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
 
-    log_number = 0
     epochs = args.epochs
     patience = 0
     best_metric = 0
     total_start_time = time.time()
     total_train_loss_history = []
-    for epoch_num in range(epochs):
+    passed_epochs = 0
+
+    if "{}.pt".format(args.model) in os.listdir('models'):
+        print("Loading Pre-Trained Model")
+        data = torch.load('models/{}.pt'.format(args.model))
+        haca_model.load_state_dict(data["state_dict"])
+        passed_epochs = data["epoch"]
+
+    for epoch_num in range(passed_epochs, passed_epochs+epochs):
         # If patience goes to 4, the learning rate is decayed by half
         if patience == 4:
             scheduler.step()
@@ -251,20 +274,21 @@ if __name__ == "__main__":
             if device.type == "cuda":
                 haca_model.cuda()
             patience = 0
-        # Training and Validation epochs
-        log_number, total_train_loss = run_epoch(epoch_num, "train", log_number)
-        _, total_valid_loss = run_epoch(epoch_num, "valid", None)
 
-        total_train_loss_history.append(total_train_loss)
+        # Training and Validation epochs
+
+        total_train_loss = run_epoch(epoch_num, "train")
+        total_valid_loss = run_epoch(epoch_num, "valid")
+
+        # total_train_loss_history.append(total_train_loss)
 
         # Evaluating the model for all the three datasets
-        for mode in ["train", "test", "valid"]:
-            metrics = test_model(haca_model, mode)
+        for mode in ["valid", "test","train"]:
+            metrics,_ = test_model(haca_model, mode, args.beam_search)
             for key in metrics:
                 writer.add_scalar("{}_{}".format(mode, key), metrics[key], epoch_num)
             if mode == "valid":
                 valid_cider_score = metrics["CIDEr"]
-            print(metrics)
 
         # Using valid cider score to determine the patience, and saving the model
         if valid_cider_score > best_metric:
@@ -273,8 +297,7 @@ if __name__ == "__main__":
             torch.save({
               'epoch': epoch_num,
               'args': args,
-              'state_dict': haca_model.state_dict(),
-              'loss_history': total_train_loss_history,
+              'state_dict': haca_model.state_dict()
             }, "models/{}.pt".format(args.model))
             patience = 0
         else:

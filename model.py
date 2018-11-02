@@ -5,6 +5,12 @@ from torch import optim
 import torch.nn.functional as F
 from utils import *
 import numpy as np
+import pickle
+
+# Vocabulary (Used while testing)
+vocab_path = "./meta_data/vocab.pkl"
+vocab = pickle.load(open(vocab_path,'rb'))
+end_token = vocab["<END>"]
 
 class customRNN(nn.Module):
     """
@@ -240,7 +246,7 @@ class HACAModel(nn.Module):
 
         self.dropout = torch.nn.Dropout(p=0.5, inplace=False)
 
-    def forward(self, input, ss_epsilon):
+    def forward(self, input, ss_epsilon, beam_search=False, beam_width=-1):
         # obtaining outputs from low level and high level encoders of both modalities
         audio_outputs_low, audio_outputs_high = self.audio_encoder(input["audio_features"])
         visual_outputs_low, visual_outputs_high = self.visual_encoder(input["visual_features"])
@@ -262,6 +268,97 @@ class HACAModel(nn.Module):
 
         output_caption = []
         input_ts = input["caption_x"][:, 0]
+
+        if beam_search:
+            lengths = torch.ones([self.batch_size*beam_width, 1], device=self.device)
+            mask = torch.ones([self.batch_size*beam_width, 1], device=self.device)
+            # Reinitializing the memory and cell states
+            ########################################################################################################################
+            # Hidden states and cell states for local decoder
+            memory_local, cell_state_local = self.local_decoder.decoder_rnn.initHidden()
+            memory_local_list, cell_state_local = [torch.stack([memory_local]*self.batch_size*beam_width, dim=1)], torch.stack([cell_state_local]*self.batch_size*beam_width, dim=1)
+
+            # Hidden states and cell states for global decoder
+            memory_global, cell_state_global = self.global_decoder.decoder_rnn.initHidden()
+            memory_global_list, cell_state_global = [torch.stack([memory_global]*self.batch_size*beam_width, dim=1)], torch.stack([cell_state_global]*self.batch_size*beam_width, dim=1)
+
+            local_context  = torch.zeros([self.batch_size*beam_width, 1, self.local_decoder.context_size], device=self.device)
+            global_context = torch.zeros([self.batch_size*beam_width, 1, self.global_decoder.context_size], device=self.device)
+            ########################################################################################################################
+
+            softmax = nn.Softmax(dim=1)
+            sentences = torch.zeros([self.batch_size*beam_width, 1], device=self.device)
+            sentences[:,0] = input_ts[0]
+            probability_list = torch.zeros([self.batch_size*beam_width, 1], device=self.device)
+
+            for key in local_encoder_outputs:
+                temp = local_encoder_outputs[key]
+                temp2 = torch.zeros([temp.shape[0]*beam_width, temp.shape[1], temp.shape[2]], device = self.device)
+                for index in range(self.batch_size):
+                    temp2[index*beam_width:(index+1)*beam_width, :, :] = temp[index, :, :]
+                local_encoder_outputs[key] = temp2
+
+            for key in global_encoder_outputs:
+                temp = global_encoder_outputs[key]
+                temp2 = torch.zeros([temp.shape[0]*beam_width, temp.shape[1], temp.shape[2]], device = self.device)
+                for index in range(self.batch_size):
+                    temp2[index*beam_width:(index+1)*beam_width, :, :] = temp[index, :, :]
+                global_encoder_outputs[key] = temp2
+
+            for time_step in range(self.max_caption_length):
+                input_ts = torch.unsqueeze(self.input_embeddings(sentences[:,-1].long()), dim=1)
+                # One time_step for global decoder
+                output_global, memory_global, cell_state_global, global_context = self.global_decoder(input_ts, global_encoder_outputs, memory_global_list, cell_state_global, global_context)
+                memory_global_list.append(memory_global)
+
+                # One time_step for local decoder
+                output_local, memory_local, cell_state_local, local_context = self.local_decoder(torch.cat([input_ts, output_global], dim=2), local_encoder_outputs, memory_local_list, cell_state_local, local_context)
+                memory_local_list.append(memory_local)
+
+                output_local = softmax(torch.squeeze(output_local, dim=1))
+                output_local = torch.log(output_local)
+                new_sentences = torch.zeros([self.batch_size*beam_width, sentences.shape[1]+1], device = self.device)
+
+                current_index = 0
+                carry_forward_indexes = [0]*self.batch_size*beam_width
+                temp_mask = torch.ones([self.batch_size*beam_width, 1], device=self.device)
+                for index in range(self.batch_size):
+                    output_flattened = output_local[index*beam_width : (index+1)*beam_width,:]
+                    output_flattened = (output_flattened + (mask[index*beam_width : (index+1)*beam_width, :])*(probability_list[index*beam_width : (index+1)*beam_width, :]))/torch.sqrt(lengths[index*beam_width : (index+1)*beam_width, :])
+                    output_flattened = torch.reshape(output_flattened, (-1,))
+                    topk = torch.topk(output_flattened, k=beam_width, dim=0)
+                    for index_ in range(len(topk[1])):
+                        beam_ind = topk[1][index_].item()//self.config["vocab_size"]
+                        new_sentences[current_index, :sentences.shape[1]] = sentences[index*beam_width + beam_ind, :]
+                        new_sentences[current_index, sentences.shape[1]] = topk[1][index_].item()%self.config["vocab_size"]
+                        if topk[1][index_].item()%self.config["vocab_size"] == end_token:
+                            temp_mask[current_index, 0] = 0
+                        else:
+                            temp_mask[current_index, 0] = mask[index*beam_width + beam_ind]
+                        carry_forward_indexes[current_index] = index*beam_width + beam_ind
+                        current_index += 1
+
+                memory_global_list = [item[:,carry_forward_indexes,:] for item in memory_global_list]
+                memory_local_list = [item[:,carry_forward_indexes,:] for item in memory_local_list]
+                cell_state_global = cell_state_global[:,carry_forward_indexes,:]
+                cell_state_local = cell_state_local[:,carry_forward_indexes,:]
+                local_context = local_context[carry_forward_indexes, :, :]
+                global_context = global_context[carry_forward_indexes, :, :]
+                probability_list = probability_list[carry_forward_indexes,:]
+                lengths = lengths[carry_forward_indexes, :]
+
+                assert current_index == self.batch_size*beam_width
+                mask = temp_mask
+                sentences = new_sentences
+
+                probability_list = probability_list + (mask*torch.gather(output_local, dim=1, index=new_sentences[:,-1].long().view(-1,1)))
+                lengths += mask
+
+            best_sentences = [sentences[index*beam_width, :] for index in range(self.batch_size)]
+            best_sentences = torch.stack(best_sentences, dim=0)
+            return best_sentences[:, 1:]
+
+
         for time_step in range(self.max_caption_length):
             input_ts = torch.unsqueeze(self.input_embeddings(input_ts), dim=1)
             # One time_step for global decoder

@@ -1,6 +1,9 @@
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+# from pycocoevalcap.spice.spice import Spice
 
 class COCOEvalCap:
     def __init__(self,images,gts,res):
@@ -30,7 +33,10 @@ class COCOEvalCap:
         print('setting up scorers...')
         scorers = [
             (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
-            (Cider(), "CIDEr")
+            (Meteor(),"METEOR"),
+            (Rouge(), "ROUGE_L"),
+            (Cider(), "CIDEr"),
+
         ]
 
         # =================================================
@@ -87,7 +93,7 @@ def calculate_metrics(datasetGTS,datasetRES):
 
     evalObj = COCOEvalCap(imgIds,gts,res)
     evalObj.evaluate()
-    return evalObj.eval
+    return evalObj.eval, evalObj.imgToEval
 
 if __name__ == '__main__':
     datasetGTS = {
@@ -101,4 +107,4 @@ if __name__ == '__main__':
         'annotations': [{u'image_id': 0, u'caption': u'man is playing guitar'},
                         {u'image_id': 1, u'caption': u'a woman is cutting vegetables'}]
         }
-    print(calculate_metrics(rng,datasetGTS,datasetRES))
+    print(calculate_metrics(datasetGTS,datasetRES))
