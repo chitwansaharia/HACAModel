@@ -1,3 +1,4 @@
+from comet_ml import Experiment
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -12,6 +13,12 @@ import time
 import datetime
 from evaluate import calculate_metrics
 from baseline_model import *
+
+
+# Comet Experiment
+experiment = Experiment(api_key="wvhLtpIy95aGJDY85KV3am5ml",
+                        project_name="btp-project", workspace="chitwansaharia")
+
 
 
 parser = argparse.ArgumentParser()
@@ -108,9 +115,9 @@ def run_epoch(epoch, mode):
     haca_model.train()
     # Logging the epoch parameters
     if mode == "train":
-        writer.add_scalar("Epoch Training Loss", total_loss/num_batch, epoch)
+        experiment.log_metric("Epoch Training Loss",total_loss/num_batch, epoch)
     else:
-        writer.add_scalar("Epoch Validation Loss", total_loss/num_batch, epoch)
+        experiment.log_metric("Epoch Validation Loss", total_loss/num_batch, epoch)
     return total_loss/num_batch
 
 
@@ -211,6 +218,7 @@ if __name__ == "__main__":
         "vocab_size" : 10004,
         "embedding_size" : 512
         }
+    # experiment.log_multiple_params({"beam width" : beam_width,"batch_size" : batch_size, "optimizer" : args.optimizer, "model_type" : args.model_type})
 
     # Tensorboard writer to write the summary
     if not os.path.isdir("logs"):
@@ -279,14 +287,14 @@ if __name__ == "__main__":
 
         total_train_loss = run_epoch(epoch_num, "train")
         total_valid_loss = run_epoch(epoch_num, "valid")
-
-        # total_train_loss_history.append(total_train_loss)
+        #
+        total_train_loss_history.append(total_train_loss)
 
         # Evaluating the model for all the three datasets
         for mode in ["valid", "test","train"]:
             metrics,_ = test_model(haca_model, mode, args.beam_search)
             for key in metrics:
-                writer.add_scalar("{}_{}".format(mode, key), metrics[key], epoch_num)
+                experiment.log_metric("{}_{}".format(mode, key), metrics[key], epoch_num)
             if mode == "valid":
                 valid_cider_score = metrics["CIDEr"]
 
